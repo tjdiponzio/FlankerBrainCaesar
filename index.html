@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <title>Eriksen Flanker Task - iOS Optimized</title>
+    <style>
+        :root {
+            --bg-color: #000000;
+            --text-color: #ffffff;
+            --correct-color: #00FF00;
+            --error-color: #FF3333;
+        }
+
+        html {
+            -webkit-text-size-adjust: 100%; /* Prevents iOS font-boosting layout breakage */
+            height: 100%;
+        }
+
+        body {
+            margin: 0;
+            padding: 0;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100dvh; /* Uses modern Dynamic Viewport Height to neutralize Safari UI bars */
+            overflow: hidden;
+            user-select: none;
+            -webkit-user-select: none; /* Crucial for iOS webviews */
+            touch-action: none; /* Disables double-tap zoom and elastic scroll behaviors */
+            position: fixed; /* Hard-locks mobile viewport context */
+            width: 100%;
+            height: 100%;
+        }
+
+        .container {
+            width: 100%;
+            height: 100dvh;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            position: relative;
+            box-sizing: border-box;
+            -webkit-tap-highlight-color: transparent; /* Eliminates the gray touch box highlight on iOS */
+            /* Accounts for iPhone notch configurations */
+            padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+        }
+
+        .display-text {
+            text-align: center;
+            white-space: pre-wrap;
+            line-height: 1.4;
+            pointer-events: none; /* Lets touches pass cleanly through directly to coordinates calculation */
+        }
+
+        .instruction-view { font-size: 22px; padding: 20px; }
+        .fixation-view { font-size: 80px; font-family: monospace; }
+        .stimulus-view { font-size: 64px; font-weight: bold; letter-spacing: 6px; font-family: monospace; }
+        .feedback-view { font-size: 52px; font-weight: bold; }
+
+        /* Performance Metrics Card */
+        .results-view {
+            font-family: Menlo, Monaco, Consolas, 'Courier New', monospace; /* Uses iOS native monospace fallback first */
+            font-size: 16px;
+            text-align: left;
+            line-height: 2;
+            width: 90%;
+            max-width: 450px;
+        }
+        
+        .results-title {
+            color: var(--correct-color);
+            font-size: 26px;
+            font-weight: bold;
+            font-family: -apple-system, sans-serif;
+            text-align: center;
+            margin-bottom: 30px;
+        }
+
+        /* Split-screen input indicators for clear visual guidance during instructions */
+        .touch-guide {
+            position: absolute;
+            top: 0;
+            width: 50%;
+            height: 100%;
+            display: flex;
+            align-items: flex-end;
+            justify-content: center;
+            padding-bottom: calc(40px + env(safe-area-inset-bottom));
+            box-sizing: border-box;
+            font-size: 14px;
+            font-weight: bold;
+            color: #444444;
+            text-transform: uppercase;
+            pointer-events: none;
+            transition: opacity 0.3s;
+        }
+        .left-guide { left: 0; border-right: 1px dashed #222; }
+        .right-guide { right: 0; }
+    </style>
+</head>
+<body>
+
+<div class="container" id="taskContainer">
+    <div id="mainDisplay" class="display-text instruction-view">
+        FLANKER TASK<br><br>
+        Focus on the MIDDLE arrow.<br><br>
+        TAP LEFT SIDE FOR &lt;<br>
+        TAP RIGHT SIDE FOR &gt;<br><br>
+        Tap anywhere to start.
+    </div>
+
+    <div id="leftGuide" class="touch-guide left-guide">◀ Tap Left (&lt;)</div>
+    <div id="rightGuide" class="touch-guide right-guide">Tap Right (&gt;) ▶</div>
+</div>
+
+<script>
+    // Stimuli Configurations Matching Python Arrays
+    const Flankers = [
+        { text: ">>>>>", correct: "p", cond: "Congruent" },
+        { text: "<<><<", correct: "p", cond: "Incongruent" },
+        { text: ">><>>", correct: "q", cond: "Incongruent" },
+        { text: "<<<<<", correct: "q", cond: "Congruent" }
+    ];
+
+    // Generate 100 random trial blocks (4 shapes * 25 runs)
+    let trials = [];
+    for (let i = 0; i < 25; i++) {
+        trials.push(...JSON.parse(JSON.stringify(Flankers)));
+    }
+    // Fisher-Yates Array Shuffle
+    for (let i = trials.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [trials[i], trials[j]] = [trials[j], trials[i]];
+    }
+
+    // Paradigm State Engines
+    let trialIndex = 0;
+    let results = [];
+    let startTime = 0;
+    let isAcceptingInput = false;
+    let experimentStarted = false;
+    let timeoutId = null;
+
+    const TIME_LIMIT = 1500; // 1.5 seconds expiration window
+
+    const container = document.getElementById('taskContainer');
+    const mainDisplay = document.getElementById('mainDisplay');
+    const leftGuide = document.getElementById('leftGuide');
+    const rightGuide = document.getElementById('rightGuide');
+
+    // Unified Pointer Event listener: Replaces click and touchstart to bypass iOS $300ms delay and ghost touches completely
+    container.addEventListener('pointerdown', handleResponse, { passive: false });
+
+    function handleResponse(e) {
+        e.preventDefault(); // Cleanly blocks native zoom and browser panning defaults
+
+        // Extract client horizontal position universally from the pointer device
+        const clientX = e.clientX;
+        const screenWidth = window.innerWidth;
+        const userChoice = (clientX < screenWidth / 2) ? "q" : "p"; // Left = q, Right = p
+
+        // Lifecycle 1: Game Start trigger
+        if (!experimentStarted) {
+            experimentStarted = true;
+            leftGuide.style.opacity = '0';
+            rightGuide.style.opacity = '0';
+            runNextTrial();
+            return;
+        }
+
+        // Lifecycle 2: Evaluation calculation phase
+        if (isAcceptingInput) {
+            isAcceptingInput = false;
+            if (timeoutId) clearTimeout(timeoutId);
+
+            const rt = performance.now() - startTime;
+            const currentTrial = trials[trialIndex];
+
+            if (userChoice === currentTrial.correct) {
+                displayFeedback("CORRECT", "var(--correct-color)", rt, 1, currentTrial.cond);
+            } else {
+                displayFeedback("INCORRECT", "var(--error-color)", rt, 0, currentTrial.cond);
+            }
+        }
+    }
+
+    function handleTimeout() {
+        if (!isAcceptingInput) return;
+        isAcceptingInput = false;
+        const currentTrial = trials[trialIndex];
+        displayFeedback("TOO SLOW!", "var(--error-color)", TIME_LIMIT, 0, currentTrial.cond);
+    }
+
+    function displayFeedback(msg, color, rt, accuracy, cond) {
+        results.push({ cond: cond, rt: rt, accuracy: accuracy });
+        trialIndex++;
+
+        mainDisplay.className = "display-text feedback-view";
+        mainDisplay.style.color = color;
+        mainDisplay.textContent = msg;
+
+        setTimeout(runNextTrial, 800);
+    }
+
+    function runNextTrial() {
+        if (trialIndex >= trials.length) {
+            showResultsPage();
+            return;
+        }
+
+        mainDisplay.className = "display-text fixation-view";
+        mainDisplay.style.color = "var(--text-color)";
+        mainDisplay.textContent = "+";
+
+        setTimeout(showStimulus, 700);
+    }
+
+    function showStimulus() {
+        mainDisplay.className = "display-text stimulus-view";
+        mainDisplay.style.color = "var(--text-color)";
+        mainDisplay.textContent = trials[trialIndex].text;
+
+        startTime = performance.now();
+        isAcceptingInput = true;
+        timeoutId = setTimeout(handleTimeout, TIME_LIMIT);
+    }
+
+    function showResultsPage() {
+        container.innerHTML = ""; // Clear view stack safely
+
+        const resultsContainer = document.createElement('div');
+        resultsContainer.className = "results-view";
+
+        let html = `<div class="results-title">TASK RESULTS</div>`;
+
+        ["Congruent", "Incongruent"].forEach(condition => {
+            const condData = results.filter(r => r.cond === condition);
+            const correctData = condData.filter(r => r.accuracy === 1);
+            
+            const avgRt = correctData.length > 0 
+                ? (correctData.reduce((sum, r) => sum + r.rt, 0) / correctData.length).toFixed(2) 
+                : "0.00";
+            
+            const acc = condData.length > 0 
+                ? ((condData.reduce((sum, r) => sum + r.accuracy, 0) / condData.length) * 100).toFixed(1) 
+                : "0.0";
+
+            // Format layout padding cleanly
+            const labelStr = (condition + ":").padEnd(14, ' ');
+            html += `<div>${labelStr} RT: ${avgRt.padStart(7, ' ')}ms | Acc: ${acc.padStart(5, ' ')}%</div>`;
+        });
+
+        resultsContainer.innerHTML = html;
+        container.appendChild(resultsContainer);
+    }
+</script>
+
+</body>
+</html>
